@@ -1,5 +1,5 @@
 [![Python 3.11.13](https://img.shields.io/badge/python-3.11.13-blue.svg)](https://www.python.org/downloads/release/python-31111/)
-[![RLlib](https://img.shields.io/badge/RLlib-v2.54.0-blue)](https://docs.ray.io/en/latest/rllib/)
+[![RLlib](https://img.shields.io/badge/RLlib-v2.58.0-blue)](https://docs.ray.io/en/latest/rllib/)
 
 # Multi-Agent RL in Sequential Social Dilemmas — Leibo et al. (2017)
 
@@ -11,7 +11,7 @@ The paper's question: matrix-game formulations of the Prisoner's Dilemma reduce 
 
 ## What this repository is
 
-This started from Eugene Vinitsky and collaborators' open-source SSD implementation (`sequential_social_dilemma_games`), the codebase most of the field cites for reproducing Leibo et al.'s environments. That codebase is pinned to Ray RLlib 0.8.5, an API generation Ray has since replaced twice over. This repository is a working port to current RLlib (`2.54.0`, the "new API stack": `PPOConfig`/`IMPALAConfig`/`DQNConfig` with `RLModule`, `Learner`, and `EnvRunner`), plus an evaluation layer built specifically to check the paper's own theoretical claims against trained policies rather than only reporting reward curves. It is a port and an extension, not a from-scratch reimplementation — the four environments below are Vinitsky et al.'s design, credited in full in [References](#references).
+This started from Eugene Vinitsky and collaborators' open-source SSD implementation (`sequential_social_dilemma_games`), the codebase most of the field cites for reproducing Leibo et al.'s environments. That codebase is pinned to Ray RLlib 0.8.5, an API generation Ray has since replaced twice over. This repository is a working port to current RLlib (`2.58.0`, the "new API stack": `PPOConfig`/`IMPALAConfig`/`DQNConfig` with `RLModule`, `Learner`, and `EnvRunner`), plus an evaluation layer built specifically to check the paper's own theoretical claims against trained policies rather than only reporting reward curves. It is a port and an extension, not a from-scratch reimplementation — the four environments below are Vinitsky et al.'s design, credited in full in [References](#references).
 
 ## The environments
 
@@ -33,7 +33,7 @@ This started from Eugene Vinitsky and collaborators' open-source SSD implementat
 
 ## What changed vs. the upstream codebase
 
-* **RLlib 0.8.5 → 2.54.0.** `run_scripts/train.py` now builds `PPOConfig`, `IMPALAConfig`, or `DQNConfig` objects against `RLModule`/`Learner`/`EnvRunner`, rather than the legacy `Trainer`/`Policy` classes the original codebase targets.
+* **RLlib 0.8.5 → 2.58.0.** `run_scripts/train.py` now builds `PPOConfig`, `IMPALAConfig`, or `DQNConfig` objects against `RLModule`/`Learner`/`EnvRunner`, rather than the legacy `Trainer`/`Policy` classes the original codebase targets.
 * **Gym → Gymnasium, plus PettingZoo.** Environments expose `Gymnasium`-compatible single-agent interfaces, `RLlib MultiAgentEnv`, and `PettingZoo` AEC/parallel wrappers (`social_dilemmas/envs/pettingzoo_env.py`).
 * **DQN support and a working Gathering environment.** DQN was not part of the original codebase's tested algorithm set; Gathering's reward and tagging logic needed real fixes to run cleanly under the new stack.
 * **Python 3.8 → 3.11**, dependencies trimmed (Stable-Baselines3 extras and Docker tooling removed as unused).

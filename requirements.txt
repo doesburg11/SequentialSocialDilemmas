@@ -1,5 +1,5 @@
 gymnasium>=1.2.1
-ray[rllib]==2.54.0
+ray[rllib]==2.58.0
 pettingzoo>=1.25.0
 opencv-python>=3.4
 numpy>=1.21.0
