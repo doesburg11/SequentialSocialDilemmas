@@ -55,8 +55,8 @@ A rolling two-agent outcome matrix (`--show-outcome-matrix`) can also be printed
 ## Running it
 
 ```bash
-git clone git@github.com:doesburg11/Leibo2017.git
-cd Leibo2017
+git clone git@github.com:doesburg11/SequentialSocialDilemmas.git
+cd SequentialSocialDilemmas
 
 conda env create --prefix ./.conda --file environment.yml
 conda activate "$(pwd)/.conda"
