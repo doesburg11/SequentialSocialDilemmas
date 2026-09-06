@@ -14,7 +14,7 @@ python train_reputation.py \
 --rollout_fragment_length 1000 \
 --num_envs_per_worker 16 \
 --stop_at_timesteps_total $((10 * 10 ** 6)) \
---memory $((160 * 10 ** 9)) \
+--memory $((40 * 10 ** 9)) \
 --cpus_per_worker 1 \
 --gpus_per_worker 0 \
 --gpus_for_driver 1 \

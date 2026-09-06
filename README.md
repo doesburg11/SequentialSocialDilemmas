@@ -3,6 +3,8 @@
 
 # Multi-Agent RL in Sequential Social Dilemmas — Leibo et al. (2017)
 
+> **This is a Vinitsky-codebase port, not a from-scratch paper reproduction.** This repository updates Eugene Vinitsky et al.'s existing open-source [`sequential_social_dilemma_games`](https://github.com/eugenevinitsky/sequential_social_dilemma_games) implementation to Ray RLlib's new API stack (see [What this repository is](#what-this-repository-is)) — it does not reimplement Leibo et al. (2017) from the paper text. For a from-scratch, paper-faithful *direct* reproduction of that paper (its own environments built from the paper's own description, its own independent-DQN training loop, no dependency on Vinitsky's or anyone else's code), see the sibling repo **[Leibo2017](https://github.com/doesburg11/Leibo2017)** instead. The two repos' near-identical names are a common source of confusion — this note is here so the two are never mistaken for each other.
+
 A maintained update of the open-source **Sequential Social Dilemma (SSD)** environments and training code, ported to Ray RLlib's new API stack, replicating the setup from:
 
 > Leibo, J. Z., Zambaldi, V., Lanctot, M., Marecki, J., & Graepel, T. (2017). *Multi-agent Reinforcement Learning in Sequential Social Dilemmas.* AAMAS 2017.
@@ -90,6 +92,72 @@ PYTHONPATH=. ./.conda/bin/python visualization/visualizer_rllib.py \
 
 Every environment subclasses `MapEnv` (`social_dilemmas/envs/map_env.py`) and overrides four hooks: `setup_agents` (required), plus `custom_reset`, `custom_action`, and `custom_map_update` as needed — respectively, resetting non-agent map state (e.g. respawning apples), handling non-movement actions (e.g. firing or cleaning), and applying map changes that aren't a direct consequence of an agent's action (e.g. apple regrowth).
 
+## The reputation experiment: `cleanup_reputation`
+
+A scaled-down reproduction, layered on top of Cleanup, of:
+
+> McKee, K. R., Hughes, E., Zhu, T. O., Chadwick, M. J., Koster, R., Castañeda, A. G., Beattie, C., Graepel, T., Botvinick, M., & Leibo, J. Z. (2023). [A multi-agent reinforcement learning model of reputation and cooperation in human groups](https://arxiv.org/abs/2103.04982). arXiv:2103.04982.
+
+That paper asks whether an intrinsic motivation for *reputation* — an aversion to having a worse standing than the group average — can, on its own, produce the same group coordination strategies (higher cooperation, less territorial behaviour, more turn-taking) that DeepMind's human participants exhibited when they could see each other's contributions (an *identifiable* condition) versus when they couldn't (*anonymous*). It's a natural fit for this repo's Cleanup environment: same public-goods structure (a river that needs cleaning, an orchard whose regrowth depends on it), just with an added social-cognitive reward term and a manipulation of what a player can see about the group.
+
+Note this is a different DeepMind paper from the one this repository otherwise replicates (Leibo et al. 2017) — it's part of the same lineage (Hughes et al. 2018's Cleanup/Harvest, this repo's base environments) but a separate later contribution, reused here because Cleanup was already the right environment for it.
+
+### The mechanism
+
+Each agent's overall reward is `r = r_e + r_i`: its ordinary Cleanup reward `r_e` (apples), plus a reputation term
+
+```
+r_i = -alpha * max(c_bar - c_self, 0) - beta * max(c_self - c_bar, 0)
+```
+
+where `c_self` is the agent's own exponentially-smoothed contribution level (`c ← 0.97 * c + q`, `q = 1` on any step its cleaning beam actually removes waste, else `0`) and `c_bar` is the group's mean `c_self` that step. Falling behind the group average costs `alpha`; exceeding it costs the smaller `beta` — so the term mostly punishes free-riding, with a lighter penalty for over-contributing relative to peers. `alpha ~ U(2.4, 3.0)` and `beta ~ U(0.16, 0.20)` are sampled once per agent at construction (population heterogeneity, not re-rolled every episode), matching the paper's own parameterization.
+
+**Identifiable vs. anonymous**, the paper's core manipulation: in the identifiable condition `c_bar` is the full group's mean and the `r_i` term is added to reward as above; in the anonymous condition the term is withheld entirely (contributions are still tracked, just not turned into reward). This is a simplified, binary reading of the paper's actual anonymous condition, which instead restricts *visibility* of other agents' contributions to a limited radius rather than removing the reputation channel outright — documented in [`map_env_reputation.py`](social_dilemmas/envs/map_env_reputation.py)'s docstring as a deliberate simplification, not an oversight.
+
+**A scaling correction worth knowing about**: the paper's Eq. S4 reads literally as `q ∈ {0, 1}` with no further normalization, but taken literally that saturates the EMA near 33 and produces per-step reputation penalties an order of magnitude larger than the +1/apple extrinsic reward — directly contradicting the paper's own Fig. S2 ("agents do not live off intrinsic reward"). Fig. S1 plots the empirical divergence `c_self − c_bar` over ±0.004, which is exactly the unscaled range (±4) divided by 1000 — implying the paper's actual signal is normalized by episode length. `contribution_scale` (default `0.001`, i.e. `1/T` for a 1000-step episode) makes that normalization explicit and tunable; pass `contribution_scale=1.0` (or `--contribution_scale 1.0` on the training CLI) for the literal-but-implausible reading instead.
+
+### New files (nothing existing was touched)
+
+The original `MapEnv`/`CleanupEnv`/`train.py`/`env_creator.py` are untouched; this experiment is entirely new files, mirroring the shape of the originals they sit next to:
+
+* [`social_dilemmas/envs/map_env_reputation.py`](social_dilemmas/envs/map_env_reputation.py) — `MapEnvReputation`, a copy of `MapEnv` (`social_dilemmas/envs/map_env.py`) adding the reputation reward mechanism above. A subclass only needs to set `agent.contributed_this_step = 1` on a successful contribution; the base class resets the flag every step, maintains the EMA, and applies the reward.
+* [`social_dilemmas/envs/cleanup_reputation.py`](social_dilemmas/envs/cleanup_reputation.py) — `CleanupReputationEnv`, a copy of `CleanupEnv` (`social_dilemmas/envs/cleanup.py`) subclassing `MapEnvReputation`; the only functional change from `cleanup.py` is flagging a cleaning beam that actually removes waste as a contribution.
+* [`social_dilemmas/envs/env_creator_reputation.py`](social_dilemmas/envs/env_creator_reputation.py) — a sibling registry to `env_creator.py`, scoped to `cleanup_reputation`.
+* [`social_dilemmas/analysis/reputation_metrics.py`](social_dilemmas/analysis/reputation_metrics.py) — post-hoc **territoriality** and **turn-taking** metrics (below), pure functions over a logged rollout.
+* [`run_scripts/train_reputation.py`](run_scripts/train_reputation.py) — a copy of `train.py` wired to the new registry, plus `--condition {identifiable,anonymous}`, `--contribution_scale`, `--reputation_alpha_low/high`, `--reputation_beta_low/high`, `--reputation_seed`.
+* [`run_scripts/run_reputation_cleanup_identifiable.sh`](run_scripts/run_reputation_cleanup_identifiable.sh) / [`_anonymous.sh`](run_scripts/run_reputation_cleanup_anonymous.sh) — pilot-scale (10M-step, vs. the paper's ~100M steps × 120 agents) run scripts for the two conditions.
+* [`run_scripts/rollout_reputation_cleanup.py`](run_scripts/rollout_reputation_cleanup.py) — rolls out the env (random policy, or a trained checkpoint) and computes the metrics below from the resulting trajectory.
+* [`tests/test_reputation_env.py`](tests/test_reputation_env.py), [`tests/test_reputation_metrics.py`](tests/test_reputation_metrics.py) — reward-formula, EMA, seeding, and metrics-correctness tests.
+
+### The metrics
+
+Implementing Eqs. S14-S17 (territoriality) and Table S2 (turn-taking) from the paper's supplementary information — not the full set (contribution *consistency*, Eqs. S18-S19, is a documented gap, not built here):
+
+* **Territoriality** — a normalized beta-diversity score over which agents visit which river cells across an episode. Low = the same group composition tends to show up at any given river location (no territorial division of labor); high = river cells tend to be visited by disjoint subsets of the group (agents have staked out separate "territories"). The paper finds identifiability *lowers* territoriality.
+* **Turn-taking** — a recency-weighted score over the sequence of agents entering the river (an outside→inside transition; a continuous stay is one turn regardless of length). Low = one agent dominates the river; high = agents rotate through with long gaps between any one agent's own turns. The paper finds identifiability *raises* turn-taking, and that turn-taking is positively associated with collective return.
+
+### Running it
+
+Smoke test (no training, seconds):
+```bash
+cd run_scripts
+python rollout_reputation_cleanup.py --condition identifiable --num-steps 500 --seed 0
+```
+
+Train both conditions (run one at a time if you have a single GPU — each claims it via `--gpus_for_driver 1`):
+```bash
+bash run_reputation_cleanup_identifiable.sh
+bash run_reputation_cleanup_anonymous.sh
+```
+These default to a 10M-step pilot scale; adjust `--stop_at_timesteps_total` and `--memory` in the scripts for your machine. Progress and checkpoints land in `ray_results/`, same as any other run in this repo.
+
+Compute the territoriality/turn-taking metrics from a trained checkpoint:
+```bash
+python rollout_reputation_cleanup.py --condition identifiable \
+  --checkpoint <path-to-checkpoint>
+```
+The `--checkpoint` path (RLModule-based greedy action inference) is best-effort — it hasn't been exercised against a real trained checkpoint yet; the `--random-policy` default path (used above) is fully verified.
+
 ## Results
 
 Collective reward under un-tuned PPO, Cleanup and Harvest (5 agents, default hyperparameters — no reward shaping or tuning applied):
@@ -108,5 +176,6 @@ This repository sits apart from the [HintonNowlan1987](https://github.com/doesbu
 - Leibo, J. Z., Zambaldi, V., Lanctot, M., Marecki, J., & Graepel, T. (2017). [Multi-agent reinforcement learning in sequential social dilemmas](https://arxiv.org/abs/1702.03037). AAMAS 2017, 464–473.
 - Hughes, E., Leibo, J. Z., Phillips, M., Tuyls, K., Dueñez-Guzman, E., Castañeda, A. G., Dunning, I., Zhu, T., McKee, K., Koster, R., Tina Zhu, Roff, H., & Graepel, T. (2018). [Inequity aversion improves cooperation in intertemporal social dilemmas](https://arxiv.org/abs/1803.08884). NeurIPS 2018.
 - Jaques, N., Lazaridou, A., Hughes, E., Gulcehre, C., Ortega, P. A., Strouse, D. J., Leibo, J. Z., & de Freitas, N. (2019). [Social influence as intrinsic motivation for multi-agent deep reinforcement learning](https://arxiv.org/abs/1810.08647). ICML 2019.
+- McKee, K. R., Hughes, E., Zhu, T. O., Chadwick, M. J., Koster, R., Castañeda, A. G., Beattie, C., Graepel, T., Botvinick, M., & Leibo, J. Z. (2023). [A multi-agent reinforcement learning model of reputation and cooperation in human groups](https://arxiv.org/abs/2103.04982). arXiv:2103.04982 — source of the `cleanup_reputation` experiment above.
 - Vinitsky, E., Jaques, N., Leibo, J., Castañeda, A., Hughes, E., et al. [Sequential Social Dilemma Games](https://github.com/eugenevinitsky/sequential_social_dilemma_games) — the original open-source environments and training code this repository ports and extends.
 - Ray Team. [RLlib documentation](https://docs.ray.io/en/latest/rllib/) and [the new API stack migration guide](https://docs.ray.io/en/latest/rllib/new-api-stack-migration-guide.html).
