@@ -274,11 +274,18 @@ def build_experiment_config_dict(args):
         else max(1, args.num_workers) * args.num_envs_per_worker * args.rollout_fragment_length
     )
 
+    # `AlgorithmConfig.training()`'s separate `lr_schedule` kwarg is removed
+    # in the installed RLlib version -- `ValueError: lr_schedule is
+    # deprecated and must be None! Use the lr setting to setup a schedule.`
+    # A schedule is now expressed by passing the same [[timestep, value], ...]
+    # list directly as `lr` itself. Found while fixing the same bug in the
+    # sibling train_reputation.py (a copy of this file).
     lr_schedule = (
-        list(zip(args.lr_schedule_steps, args.lr_schedule_weights))
+        [[step, weight] for step, weight in zip(args.lr_schedule_steps, args.lr_schedule_weights)]
         if args.lr_schedule_steps is not None and args.lr_schedule_weights is not None
         else None
     )
+    lr_value = lr_schedule if lr_schedule is not None else args.lr
 
     algorithm_config = (
         get_algorithm_config_builder(args.algorithm)
@@ -328,8 +335,7 @@ def build_experiment_config_dict(args):
     if args.algorithm.upper() == "PPO":
         algorithm_config = algorithm_config.training(
             gamma=0.99,
-            lr=args.lr,
-            lr_schedule=lr_schedule,
+            lr=lr_value,
             train_batch_size=train_batch_size,
             entropy_coeff=args.entropy_coeff,
             grad_clip=args.grad_clip,
@@ -339,11 +345,22 @@ def build_experiment_config_dict(args):
             args=args,
             train_batch_size=train_batch_size,
         )
+        if lr_schedule is not None:
+            # apply_ppo_training_config() above unconditionally re-applies
+            # lr=config_ppo["lr"] (a constant) -- see config/ppo_config.py's
+            # own "Dashboard values are authoritative" docstring -- silently
+            # discarding any --lr_schedule_steps/--lr_schedule_weights
+            # schedule set above. Caught in review, not by inspection: the
+            # crash-fix alone looked complete but didn't actually restore
+            # the schedule. Re-apply it once more so an explicitly-requested
+            # schedule takes effect. entropy_coeff/grad_clip have the same
+            # override and are NOT restored here -- a narrower, still-open
+            # gap, left for a future pass rather than expanded scope now.
+            algorithm_config = algorithm_config.training(lr=lr_value)
     elif args.algorithm.upper() == "IMPALA":
         algorithm_config = algorithm_config.training(
             gamma=0.99,
-            lr=args.lr,
-            lr_schedule=lr_schedule,
+            lr=lr_value,
             train_batch_size=train_batch_size,
             entropy_coeff=args.entropy_coeff,
             grad_clip=args.grad_clip,
@@ -400,12 +417,15 @@ def initialize_ray(args):
     if args.multi_node and args.local_mode:
         sys.exit("You cannot have both local mode and multi node on at the same time")
     init_kwargs = {"address": args.address, "local_mode": args.local_mode}
-    if args.memory is not None:
-        init_kwargs["memory"] = args.memory
+    # `memory` and `redis_max_memory` are no longer valid ray.init() kwargs in
+    # the installed Ray version (removed upstream) -- passing either raises
+    # `RuntimeError: Unknown keyword argument(s)` immediately, before any
+    # training happens. Found while fixing the same bug in the sibling
+    # train_reputation.py (a copy of this file). Still accept the CLI flags
+    # (existing scripts may pass them) but no longer forward the ones Ray
+    # dropped; object_store_memory is still supported.
     if args.object_store_memory is not None:
         init_kwargs["object_store_memory"] = args.object_store_memory
-    if args.redis_max_memory is not None:
-        init_kwargs["redis_max_memory"] = args.redis_max_memory
 
     # Ray 2.x renamed include_webui -> include_dashboard.
     init_kwargs["include_dashboard"] = False

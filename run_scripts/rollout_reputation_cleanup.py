@@ -12,10 +12,11 @@ Two policy sources:
   produced by `train_reputation.py` / `run_reputation_cleanup_*.sh`) and
   computes each agent's action from its own policy's RLModule, mirroring
   Leibo2017's `render_rllib_rollout.py` new-API-stack action inference.
-  **This path is best-effort and has not been exercised against a real
-  trained checkpoint yet** (none existed at the time this was written) --
-  verify it once `run_reputation_cleanup_*.sh` produces one, and adjust if
-  the RLModule output shape doesn't match what's assumed here.
+  Verified against a real trained checkpoint (2026-09-09): the first attempt
+  failed outright (`Algorithm.from_checkpoint()` needs the training env
+  registered by name first, which this script didn't do -- see
+  `_checkpoint_action_fn`'s docstring for the fix), exactly the risk this
+  caveat used to warn about before any checkpoint existed to test against.
 
 A "turn" (for turn-taking) is logged when an agent *enters* the river
 region (transition from outside to inside between consecutive steps),
@@ -65,16 +66,66 @@ def _random_action_fn(env):
     return choose_actions
 
 
-def _checkpoint_action_fn(checkpoint_path):
-    """Best-effort: load a trained checkpoint and compute greedy actions per
-    agent from its own policy's RLModule. See module docstring's caveat --
-    not yet verified against a real checkpoint."""
+def _checkpoint_action_fn(checkpoint_path, args):
+    """Load a trained checkpoint and compute greedy actions per agent from
+    its own policy's RLModule.
+
+    Regression fix: `Algorithm.from_checkpoint()` reconstructs the full
+    algorithm, including its env-runners -- which need the training env
+    registered under the same name (`cleanup_reputation_env`) the
+    checkpoint was saved with, via `tune.register_env()`. An earlier
+    version skipped this, so this path failed on its first real exercise
+    against an actual checkpoint (`ray.rllib.utils.error.EnvError: The env
+    string you provided ('cleanup_reputation_env') is: a) Not a supported
+    or an installed environment...`) -- exactly the risk the module
+    docstring's "not yet verified" caveat had flagged. `args` supplies the
+    condition/num_agents/etc. needed to reconstruct an env matching what
+    the checkpoint was actually trained on; using the wrong condition here
+    wouldn't error, just silently evaluate the policy in an env slightly
+    different from its own training env.
+    """
     import torch
     from ray.rllib.algorithms.algorithm import Algorithm
     from ray.rllib.core.columns import Columns
+    from ray.tune.registry import register_env
+
+    from run_scripts.train_reputation import _RLlibEnvAdapter
+    from social_dilemmas.envs.env_creator_reputation import get_env_creator_reputation
+
+    base_env_creator = get_env_creator_reputation(
+        env="cleanup_reputation",
+        num_agents=args.num_agents,
+        return_agent_actions=False,
+        reputation_reward=True,
+        identifiable=(args.condition == "identifiable"),
+        contribution_ema_lambda=args.contribution_ema_lambda,
+        reputation_seed=args.seed,
+    )
+
+    def env_creator(env_config):
+        max_episode_steps = 1000
+        if isinstance(env_config, dict):
+            max_episode_steps = env_config.get("max_episode_steps", max_episode_steps)
+        return _RLlibEnvAdapter(base_env_creator(env_config), max_episode_steps=max_episode_steps)
+
+    register_env("cleanup_reputation_env", env_creator)
 
     algo = Algorithm.from_checkpoint(checkpoint_path)
-    module_dict = algo.get_module()  # MultiRLModule keyed by module (agent) id
+    # Regression fix: Algorithm.get_module() takes a *single* module_id
+    # (default 'default_policy') and returns *one* RLModule, not a dict of
+    # all of them -- calling it with no args (as an earlier version did)
+    # silently returns None here, since our modules are named "agent-0" etc,
+    # not "default_policy". Cache per-agent lookups instead of refetching
+    # every step.
+    module_cache = {}
+
+    def get_module(agent_id):
+        if agent_id not in module_cache:
+            module = algo.get_module(agent_id)
+            if module is None:
+                raise ValueError(f"No RLModule found for module_id={agent_id!r} in this checkpoint")
+            module_cache[agent_id] = module
+        return module_cache[agent_id]
 
     def choose_actions(obs):
         actions = {}
@@ -86,7 +137,7 @@ def _checkpoint_action_fn(checkpoint_path):
             # consume it as an image.
             obs_arr = np.asarray(agent_obs["curr_obs"], dtype=np.float32)
             batch = {Columns.OBS: torch.as_tensor(obs_arr).unsqueeze(0)}
-            module_out = module_dict[agent_id].forward_inference(batch)
+            module_out = get_module(agent_id).forward_inference(batch)
             if Columns.ACTIONS in module_out:
                 action = module_out[Columns.ACTIONS][0]
             else:
@@ -108,7 +159,7 @@ def rollout(args):
         np.random.seed(args.seed)
 
     action_fn = (
-        _checkpoint_action_fn(args.checkpoint) if args.checkpoint else _random_action_fn(env)
+        _checkpoint_action_fn(args.checkpoint, args) if args.checkpoint else _random_action_fn(env)
     )
 
     river_region = {tuple(pos) for pos in env.waste_points}

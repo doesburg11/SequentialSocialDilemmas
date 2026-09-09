@@ -346,11 +346,20 @@ def build_experiment_config_dict(args):
         else max(1, args.num_workers) * args.num_envs_per_worker * args.rollout_fragment_length
     )
 
+    # `AlgorithmConfig.training()`'s separate `lr_schedule` kwarg is removed
+    # in the installed RLlib version -- `ValueError: lr_schedule is
+    # deprecated and must be None! Use the lr setting to setup a schedule.`
+    # A schedule is now expressed by passing the same [[timestep, value], ...]
+    # list directly as `lr` itself (both pilot shell scripts pass
+    # --lr_schedule_steps/--lr_schedule_weights, so this crashed on the very
+    # first config build). Found only by actually running training, same
+    # class of bug as the ray.init(memory=...) one above.
     lr_schedule = (
-        list(zip(args.lr_schedule_steps, args.lr_schedule_weights))
+        [[step, weight] for step, weight in zip(args.lr_schedule_steps, args.lr_schedule_weights)]
         if args.lr_schedule_steps is not None and args.lr_schedule_weights is not None
         else None
     )
+    lr_value = lr_schedule if lr_schedule is not None else args.lr
 
     algorithm_config = (
         get_algorithm_config_builder(args.algorithm)
@@ -400,8 +409,7 @@ def build_experiment_config_dict(args):
     if args.algorithm.upper() == "PPO":
         algorithm_config = algorithm_config.training(
             gamma=0.99,
-            lr=args.lr,
-            lr_schedule=lr_schedule,
+            lr=lr_value,
             train_batch_size=train_batch_size,
             entropy_coeff=args.entropy_coeff,
             grad_clip=args.grad_clip,
@@ -411,11 +419,24 @@ def build_experiment_config_dict(args):
             args=args,
             train_batch_size=train_batch_size,
         )
+        if lr_schedule is not None:
+            # apply_ppo_training_config() above unconditionally re-applies
+            # lr=config_ppo["lr"] (a constant) -- see config/ppo_config.py's
+            # own "Dashboard values are authoritative" docstring -- silently
+            # discarding any --lr_schedule_steps/--lr_schedule_weights
+            # schedule set above. Re-apply it once more so an explicitly
+            # requested schedule takes effect. entropy_coeff/grad_clip have
+            # the same override and are NOT restored here -- a narrower,
+            # still-open gap. Fixed here (and in the sibling train.py) only
+            # after the identifiable-vs-anonymous 6-run comparison finished
+            # -- that comparison itself ran with the constant lr=0.0001 on
+            # both conditions (fair paired comparison, but not the intended
+            # decaying schedule); see the README for that caveat.
+            algorithm_config = algorithm_config.training(lr=lr_value)
     elif args.algorithm.upper() == "IMPALA":
         algorithm_config = algorithm_config.training(
             gamma=0.99,
-            lr=args.lr,
-            lr_schedule=lr_schedule,
+            lr=lr_value,
             train_batch_size=train_batch_size,
             entropy_coeff=args.entropy_coeff,
             grad_clip=args.grad_clip,
@@ -472,12 +493,16 @@ def initialize_ray(args):
     if args.multi_node and args.local_mode:
         sys.exit("You cannot have both local mode and multi node on at the same time")
     init_kwargs = {"address": args.address, "local_mode": args.local_mode}
-    if args.memory is not None:
-        init_kwargs["memory"] = args.memory
+    # `memory` and `redis_max_memory` are no longer valid ray.init() kwargs in
+    # the installed Ray version (removed upstream) -- passing either raises
+    # `RuntimeError: Unknown keyword argument(s)` immediately, before any
+    # training happens. Caught only by actually running this against a real
+    # Ray install: both run_reputation_cleanup_*.sh pass --memory, so every
+    # documented pilot run would have crashed on the very first line. Still
+    # accept the CLI flags (existing scripts pass them) but no longer forward
+    # the ones Ray dropped; object_store_memory is still supported.
     if args.object_store_memory is not None:
         init_kwargs["object_store_memory"] = args.object_store_memory
-    if args.redis_max_memory is not None:
-        init_kwargs["redis_max_memory"] = args.redis_max_memory
 
     # Ray 2.x renamed include_webui -> include_dashboard.
     init_kwargs["include_dashboard"] = False
